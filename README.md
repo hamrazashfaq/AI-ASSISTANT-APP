@@ -99,4 +99,10 @@ To update the app later, just `git add . && git commit -m "..." && git push`. St
 - The free Gemini tier has rate limits. If you see a "busy or quota" message, wait a minute.
 - Don't type personal identifiers (name, ID number, phone) into the app.
 - The keyword safety check is a simple safety net, not a medical triage tool. It can miss some wording and can occasionally trigger on harmless text.
-- AI answers can be wrong. Treat them as a starting point for questions to ask a professional.# AI-ASSISTANT-APP
+- AI answers can be wrong. Treat them as a starting point for questions to ask a professional.
+
+## Troubleshooting
+
+- **`ImportError` / `ModuleNotFoundError` on Streamlit Cloud:** make sure `requirements.txt` is in the **root** of the repository (next to `app.py`, not inside a sub-folder), then reboot the app from **Manage app → Reboot**. This app talks to Gemini through plain HTTPS (`requests`), so it needs no Google SDK.
+- **"No Gemini API key found":** add `GEMINI_API_KEY` under **Settings → Secrets** (cloud) or in `.streamlit/secrets.toml` (local).
+- **"API key looks invalid":** create a new key in Google AI Studio and paste it again.
