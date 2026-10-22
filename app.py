@@ -23,7 +23,9 @@ logger = logging.getLogger(__name__)
 # --------------------------------------------------------------------------- #
 # Configuration
 # --------------------------------------------------------------------------- #
-DEFAULT_MODEL = "gemini-2.5-flash"  # override with GEMINI_MODEL in secrets/env
+DEFAULT_MODEL = "gemini-3.8-flash"  # override with GEMINI_MODEL in secrets/env
+# Tried in order when the main model is unavailable for this key or quota.
+FALLBACK_MODELS = ["gemini-3.6-flash", "gemini-3.5-flash-lite", "gemini-2.5-flash"]
 MAX_CHARS = 1000          # longest question we accept
 MIN_CHARS = 5             # shortest question we accept
 COOLDOWN_SECONDS = 3      # minimum gap between two requests from one session
@@ -169,6 +171,35 @@ def build_prompt(question: str, age_group: str, duration: str) -> str:
 GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
 
 
+class ModelError(RuntimeError):
+    """The Gemini API answered with an error status."""
+
+    def __init__(self, status_code: int, message: str):
+        super().__init__(message)
+        self.status_code = status_code
+
+
+class GenerationError(RuntimeError):
+    """Every model we tried failed. `last` is the final error, `log` the attempts."""
+
+    def __init__(self, last: Exception, log: list[str]):
+        super().__init__(str(last))
+        self.last = last
+        self.log = log
+
+
+def should_try_next_model(exc: Exception) -> bool:
+    """True when another model might succeed (model missing, busy or out of quota)."""
+    if not isinstance(exc, ModelError):
+        return False  # network problem, blocked answer, etc.: another model won't help
+    msg = str(exc).lower()
+    if "api key" in msg or "permission_denied" in msg:
+        return False  # a bad key fails on every model
+    return exc.status_code in (404, 429, 500, 503) or (
+        exc.status_code == 400 and "model" in msg
+    )
+
+
 def generate_answer(api_key: str, prompt: str, model: str) -> str:
     """Call the Gemini REST API and return the answer text (raises on failure).
 
@@ -194,8 +225,9 @@ def generate_answer(api_key: str, prompt: str, model: str) -> str:
 
     if response.status_code != 200:
         err = data.get("error", {}) if isinstance(data, dict) else {}
-        raise RuntimeError(
-            f"{response.status_code} {err.get('status', '')}: {err.get('message', 'request failed')}"
+        raise ModelError(
+            response.status_code,
+            f"{response.status_code} {err.get('status', '')}: {err.get('message', 'request failed')}",
         )
 
     # Concatenate the text parts of the first candidate.
@@ -207,6 +239,24 @@ def generate_answer(api_key: str, prompt: str, model: str) -> str:
     if not text:
         raise ValueError("EMPTY_RESPONSE")  # blocked by safety filters or empty
     return text
+
+
+def generate_with_fallback(api_key: str, prompt: str, preferred: str) -> tuple[str, list[str]]:
+    """Try the preferred model, then the fallbacks. Returns (answer, attempt log)."""
+    models = [preferred] + [m for m in FALLBACK_MODELS if m != preferred]
+    log: list[str] = []
+    last: Exception | None = None
+    for model in models:
+        try:
+            text = generate_answer(api_key, prompt, model)
+            log.append(f"{model}: OK")
+            return text, log
+        except Exception as exc:  # noqa: BLE001
+            last = exc
+            log.append(f"{model}: {type(exc).__name__}: {str(exc).replace(api_key, '***')[:300]}")
+            if not should_try_next_model(exc):
+                break
+    raise GenerationError(last or RuntimeError("no model tried"), log)
 
 
 def friendly_error(exc: Exception) -> str:
@@ -224,6 +274,11 @@ def friendly_error(exc: Exception) -> str:
         return "The AI service is busy or the free quota is used up. Please try again in a minute."
     if "503" in msg or "UNAVAILABLE" in upper or "OVERLOADED" in upper:
         return "The AI service is temporarily unavailable. Please try again shortly."
+    if "404" in msg or "NOT_FOUND" in upper or "NO LONGER AVAILABLE" in upper:
+        return (
+            "None of the configured Gemini models is available for this API key. "
+            "Set `GEMINI_MODEL` in Secrets to a current Flash model (see the README)."
+        )
     return "Something went wrong while contacting the AI service. Please try again."
 
 
@@ -255,6 +310,7 @@ def handle_submission(question: str, age_group: str, duration: str) -> None:
     state = st.session_state
     state["answer"] = None
     state["error"] = None
+    state["debug"] = []
     state["flags"] = {"emergency": False, "self_harm": False}
 
     if len(question) < MIN_CHARS:
@@ -281,7 +337,11 @@ def handle_submission(question: str, age_group: str, duration: str) -> None:
         with st.spinner("Looking up general health information..."):
             prompt = build_prompt(question, age_group, duration)
             model = get_setting("GEMINI_MODEL", DEFAULT_MODEL)
-            state["answer"] = generate_answer(api_key, prompt, model)
+            state["answer"], state["debug"] = generate_with_fallback(api_key, prompt, model)
+    except GenerationError as exc:
+        logger.error("Gemini request failed: %s", " | ".join(exc.log))
+        state["error"] = friendly_error(exc.last)
+        state["debug"] = exc.log
     except Exception as exc:  # show a friendly message, log the real one
         logger.exception("Gemini request failed")
         state["error"] = friendly_error(exc)
@@ -307,6 +367,9 @@ def render_results() -> None:
 
     if state.get("error"):
         st.error(state["error"])
+        if state.get("debug"):
+            with st.expander("Technical details (useful for fixing the problem)"):
+                st.code("\n".join(state["debug"]), language="text")
 
     if state.get("answer"):
         st.subheader("General information")
