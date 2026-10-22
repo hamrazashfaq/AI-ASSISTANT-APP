@@ -15,9 +15,8 @@ import os
 import re
 import time
 
+import requests
 import streamlit as st
-from google import genai
-from google.genai import types
 
 logger = logging.getLogger(__name__)
 
@@ -157,12 +156,6 @@ def get_api_key() -> str | None:
     return get_setting("GEMINI_API_KEY") or os.getenv("GOOGLE_API_KEY")
 
 
-@st.cache_resource(show_spinner=False)
-def get_client(api_key: str) -> genai.Client:
-    """Create the Gemini client once and reuse it across reruns."""
-    return genai.Client(api_key=api_key)
-
-
 def build_prompt(question: str, age_group: str, duration: str) -> str:
     """Combine the question with optional context into one prompt."""
     parts = [f'User question or symptom description:\n"""\n{question}\n"""']
@@ -173,19 +166,46 @@ def build_prompt(question: str, age_group: str, duration: str) -> str:
     return "\n\n".join(parts)
 
 
-def generate_answer(client: genai.Client, prompt: str, model: str) -> str:
-    """Call Gemini and return the answer text (raises on failure)."""
-    response = client.models.generate_content(
-        model=model,
-        contents=prompt,
-        config=types.GenerateContentConfig(
-            system_instruction=SYSTEM_INSTRUCTION,
-            temperature=0.3,  # low = more careful, consistent answers
-        ),
+GEMINI_URL = "https://generativelanguage.googleapis.com/v1beta/models/{model}:generateContent"
+
+
+def generate_answer(api_key: str, prompt: str, model: str) -> str:
+    """Call the Gemini REST API and return the answer text (raises on failure).
+
+    We use plain HTTPS (the `requests` library, which Streamlit already
+    installs) instead of an SDK, so there is one less package that can fail
+    to install on Streamlit Community Cloud.
+    """
+    payload = {
+        "systemInstruction": {"parts": [{"text": SYSTEM_INSTRUCTION}]},
+        "contents": [{"role": "user", "parts": [{"text": prompt}]}],
+        "generationConfig": {"temperature": 0.3},  # low = careful, consistent
+    }
+    response = requests.post(
+        GEMINI_URL.format(model=model),
+        headers={"x-goog-api-key": api_key, "Content-Type": "application/json"},
+        json=payload,
+        timeout=60,
     )
-    text = (response.text or "").strip()
+    try:
+        data = response.json()
+    except ValueError:
+        data = {}
+
+    if response.status_code != 200:
+        err = data.get("error", {}) if isinstance(data, dict) else {}
+        raise RuntimeError(
+            f"{response.status_code} {err.get('status', '')}: {err.get('message', 'request failed')}"
+        )
+
+    # Concatenate the text parts of the first candidate.
+    text = ""
+    for cand in (data.get("candidates") or [])[:1]:
+        parts = (cand.get("content") or {}).get("parts") or []
+        text = "".join(p.get("text", "") for p in parts if isinstance(p, dict))
+    text = text.strip()
     if not text:
-        raise ValueError("EMPTY_RESPONSE")
+        raise ValueError("EMPTY_RESPONSE")  # blocked by safety filters or empty
     return text
 
 
@@ -259,10 +279,9 @@ def handle_submission(question: str, age_group: str, duration: str) -> None:
     state["last_call"] = time.time()
     try:
         with st.spinner("Looking up general health information..."):
-            client = get_client(api_key)
             prompt = build_prompt(question, age_group, duration)
             model = get_setting("GEMINI_MODEL", DEFAULT_MODEL)
-            state["answer"] = generate_answer(client, prompt, model)
+            state["answer"] = generate_answer(api_key, prompt, model)
     except Exception as exc:  # show a friendly message, log the real one
         logger.exception("Gemini request failed")
         state["error"] = friendly_error(exc)
@@ -320,7 +339,6 @@ def main() -> None:
         handle_submission(question, age_group, duration)
 
     render_results()
-
 
 
 if __name__ == "__main__":
