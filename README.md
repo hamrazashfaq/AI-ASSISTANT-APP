@@ -40,8 +40,8 @@ pip install -r requirements.txt
 
 ```toml
 GEMINI_API_KEY = "paste-your-key-here"
-# Optional: choose another Flash model
-# GEMINI_MODEL = "gemini-2.5-flash"
+# Optional: choose another Flash model (default: gemini-3.8-flash)
+# GEMINI_MODEL = "gemini-3.8-flash"
 ```
 
 (Alternatively set an environment variable named `GEMINI_API_KEY`.)
@@ -104,5 +104,6 @@ To update the app later, just `git add . && git commit -m "..." && git push`. St
 ## Troubleshooting
 
 - **`ImportError` / `ModuleNotFoundError` on Streamlit Cloud:** make sure `requirements.txt` is in the **root** of the repository (next to `app.py`, not inside a sub-folder), then reboot the app from **Manage app → Reboot**. This app talks to Gemini through plain HTTPS (`requests`), so it needs no Google SDK.
+- **"Something went wrong..." or "model is not available":** open the **Technical details** box under the error, which shows what Google replied for each model. Google retires and renames models often, so check the [model list](https://ai.google.dev/gemini-api/docs/models) and set `GEMINI_MODEL` in Secrets. The app tries `gemini-3.8-flash` first, then `gemini-3.6-flash`, `gemini-3.5-flash-lite` and `gemini-2.5-flash`.
 - **"No Gemini API key found":** add `GEMINI_API_KEY` under **Settings → Secrets** (cloud) or in `.streamlit/secrets.toml` (local).
 - **"API key looks invalid":** create a new key in Google AI Studio and paste it again.
